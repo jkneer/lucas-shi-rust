@@ -1,5 +1,4 @@
 use image::{GrayImage, ImageBuffer, Luma};
-use imageproc::gradients::{HORIZONTAL_SCHARR, VERTICAL_SCHARR};
 use std::cmp::Ordering;
 
 use crate::utils::{box_filter_3x3::box_filter_3x3_in_place, fast_gradients::compute_gradients};
@@ -20,7 +19,7 @@ pub fn good_features_to_track(
     min_distance: u32,
 ) -> Vec<(u32, u32, f32)> {
     // Вычисление градиентов
-    let (gx, gy) = compute_gradients(image, &HORIZONTAL_SCHARR, &VERTICAL_SCHARR);
+    let (gx, gy) = compute_gradients(image);
 
     // Вычисление квадратов градиентов и их произведений
     let (mut ix_sq, mut iy_sq, mut ix_iy) = compute_gradient_products(&gx, &gy);

@@ -1,5 +1,4 @@
 use image::{GrayImage, ImageBuffer, Luma};
-use imageproc::gradients::{HORIZONTAL_SCHARR, VERTICAL_SCHARR};
 use nalgebra::{DMatrix, DVector, SVD};
 
 use crate::utils::fast_gradients::compute_gradients;
@@ -44,7 +43,7 @@ pub fn calc_optical_flow(
         // let grad_x = horizontal_scharr(prev_img);
         // let grad_y = vertical_scharr(prev_img);
         // console_log!("{}", performance.now()-now);
-        let (grad_x, grad_y) = compute_gradients(prev_img, &HORIZONTAL_SCHARR, &VERTICAL_SCHARR);
+        let (grad_x, grad_y) = compute_gradients(prev_img);
 
         // Обрабатываем каждую точку
         for ((prev_x, prev_y), disp) in prev_points.iter().zip(displacements.iter_mut()) {
