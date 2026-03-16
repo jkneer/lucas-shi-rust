@@ -3,11 +3,13 @@
 // - Writing into flat `Vec<i16>` buffers first and wrapping them with `ImageBuffer::from_vec`
 //   avoids that overhead and was measurably faster on the x86_64 dev machine.
 // - Explicit SIMD is the fastest path tested so far. On x86_64, AVX2 was roughly 5x to 6x
-//   faster than the historical implementation in earlier runs. On aarch64, this benchmark uses
-//   a separate NEON implementation, but its performance still needs to be measured on ARM
-//   hardware.
+//   faster than the historical implementation in earlier runs.
+// - On Raspberry Pi 5 (aarch64), the indexed scalar path was about 4.8x to 5.7x faster than
+//   the historical implementation, and the NEON path was about 7.5x to 13.7x faster.
 // - `imageproc`'s Scharr pair computes equivalent interior gradients, but border behavior differs:
 //   the historical code leaves borders as zero while `imageproc` clamps out-of-bounds samples.
+// - On Raspberry Pi 5, `imageproc_scharr_pair` and `gradients_grayscale` were both about 3x
+//   slower than the historical implementation and much slower than the indexed/SIMD paths.
 // - `gradients_grayscale` is not equivalent work because it computes gradient magnitude rather
 //   than returning signed `Ix` and `Iy`.
 //
@@ -109,37 +111,43 @@ fn manual_scharr_old_indexed(
     )
 }
 
+#[cfg(target_arch = "aarch64")]
 fn manual_scharr_old_simd(img: &GrayImage) -> GradientPair {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return manual_scharr_old_simd_neon(img);
-    }
+    unsafe { manual_scharr_old_simd_neon(img) }
+}
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return manual_scharr_old_simd_avx2(img);
-            }
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn manual_scharr_old_simd(img: &GrayImage) -> GradientPair {
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            return manual_scharr_old_simd_avx2(img);
         }
     }
 
     manual_scharr_old_indexed(img, &HORIZONTAL_SCHARR_3X3_OLD, &VERTICAL_SCHARR_3X3_OLD)
 }
 
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+fn manual_scharr_old_simd(img: &GrayImage) -> GradientPair {
+    manual_scharr_old_indexed(img, &HORIZONTAL_SCHARR_3X3_OLD, &VERTICAL_SCHARR_3X3_OLD)
+}
+
+#[cfg(target_arch = "aarch64")]
 fn simd_label() -> &'static str {
-    #[cfg(target_arch = "aarch64")]
-    {
-        return "manual_scharr_old_neon";
+    "manual_scharr_old_neon"
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn simd_label() -> &'static str {
+    if is_x86_feature_detected!("avx2") {
+        return "manual_scharr_old_simd";
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            return "manual_scharr_old_simd";
-        }
-    }
+    "manual_scharr_old_simd_fallback"
+}
 
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+fn simd_label() -> &'static str {
     "manual_scharr_old_simd_fallback"
 }
 
