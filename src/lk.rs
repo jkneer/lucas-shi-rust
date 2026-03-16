@@ -1,5 +1,4 @@
 use image::{GrayImage, ImageBuffer, Luma};
-use nalgebra::{DMatrix, DVector, SVD};
 
 use crate::utils::fast_gradients::compute_gradients;
 
@@ -26,7 +25,10 @@ pub fn calc_optical_flow(
 
     let n_levels = prev_pyramid.len();
     let radius = window_size / 2;
+    let n_pixels = window_size * window_size;
     let epsilon = 1e-3;
+    let det_epsilon = 1e-6;
+    let offsets = build_window_offsets(radius);
 
     // Initialize displacements to zero
     let mut displacements: Vec<(f32, f32)> = prev_points.iter().map(|_| (0.0, 0.0)).collect();
@@ -45,6 +47,10 @@ pub fn calc_optical_flow(
         // console_log!("{}", performance.now()-now);
         let (grad_x, grad_y) = compute_gradients(prev_img);
 
+        let mut prev_patch = vec![0.0f32; n_pixels];
+        let mut ix_patch = vec![0.0f32; n_pixels];
+        let mut iy_patch = vec![0.0f32; n_pixels];
+
         // Process each point
         for ((prev_x, prev_y), disp) in prev_points.iter().zip(displacements.iter_mut()) {
             // Scale the original point for the current level
@@ -60,13 +66,30 @@ pub fn calc_optical_flow(
                 continue;
             }
 
-            // Refine the displacement at the current level
-            let mut converged = false;
-            for _ in 0..max_iterations {
-                if converged {
-                    break;
-                }
+            let mut gxx = 0.0f32;
+            let mut gxy = 0.0f32;
+            let mut gyy = 0.0f32;
 
+            for (idx, (ox, oy)) in offsets.iter().enumerate() {
+                let sample_x = x + ox;
+                let sample_y = y + oy;
+                let ix = interpolate_alt(&grad_x, sample_x, sample_y) / 32.0;
+                let iy = interpolate_alt(&grad_y, sample_x, sample_y) / 32.0;
+
+                prev_patch[idx] = interpolate(prev_img, sample_x, sample_y);
+                ix_patch[idx] = ix;
+                iy_patch[idx] = iy;
+                gxx += ix * ix;
+                gxy += ix * iy;
+                gyy += iy * iy;
+            }
+
+            let Some((inv_h00, inv_h01, inv_h11)) = invert_2x2(gxx, gxy, gyy, det_epsilon) else {
+                continue;
+            };
+
+            // Refine the displacement at the current level
+            for _ in 0..max_iterations {
                 // Compute the current position in the target image
                 let curr_x = x + dx;
                 let curr_y = y + dy;
@@ -76,50 +99,22 @@ pub fn calc_optical_flow(
                     break;
                 }
 
-                // Collect data for the linear system
-                let mut a_data = Vec::with_capacity(window_size * window_size * 2);
-                let mut b_data = Vec::with_capacity(window_size * window_size);
+                let mut bx = 0.0f32;
+                let mut by = 0.0f32;
 
-                for j in -(radius as i32)..=radius as i32 {
-                    for i in -(radius as i32)..=radius as i32 {
-                        // Coordinates in the previous image
-                        let px_prev = interpolate(prev_img, x + i as f32, y + j as f32);
-
-                        // Coordinates in the current image with displacement applied
-                        let px_curr = interpolate(curr_img, curr_x + i as f32, curr_y + j as f32);
-
-                        // Gradients in the previous image (fixed)
-                        let ix = interpolate_alt(&grad_x, x + i as f32, y + j as f32) / 32.0;
-                        let iy = interpolate_alt(&grad_y, x + i as f32, y + j as f32) / 32.0;
-
-                        a_data.push(ix);
-                        a_data.push(iy);
-                        b_data.push(px_prev - px_curr);
-                    }
+                for (idx, (ox, oy)) in offsets.iter().enumerate() {
+                    let curr = interpolate(curr_img, curr_x + ox, curr_y + oy);
+                    let error = prev_patch[idx] - curr;
+                    bx += ix_patch[idx] * error;
+                    by += iy_patch[idx] * error;
                 }
 
-                // Solve the linear system
-                let n_pixels = window_size * window_size;
-                if a_data.len() != 2 * n_pixels || b_data.len() != n_pixels {
-                    break;
-                }
+                let ddx = inv_h00 * bx + inv_h01 * by;
+                let ddy = inv_h01 * bx + inv_h11 * by;
+                dx += ddx;
+                dy += ddy;
 
-                let a_matrix = DMatrix::from_row_slice(n_pixels, 2, &a_data);
-                let b_vector = DVector::from_vec(b_data);
-
-                let ata = a_matrix.transpose() * &a_matrix;
-                let atb = a_matrix.transpose() * &b_vector;
-
-                let svd = SVD::new(ata, true, true);
-                if let Ok(solution) = svd.solve(&atb, 1e-6) {
-                    let (ddx, ddy) = (solution[0], solution[1]);
-                    dx += ddx;
-                    dy += ddy;
-
-                    if ddx.abs() < epsilon && ddy.abs() < epsilon {
-                        converged = true;
-                    }
-                } else {
+                if ddx.abs() < epsilon && ddy.abs() < epsilon {
                     break;
                 }
             }
@@ -135,6 +130,28 @@ pub fn calc_optical_flow(
         .zip(displacements.iter())
         .map(|((x, y), (dx, dy))| (x + dx, y + dy))
         .collect()
+}
+
+fn build_window_offsets(radius: usize) -> Vec<(f32, f32)> {
+    let mut offsets = Vec::with_capacity((2 * radius + 1) * (2 * radius + 1));
+
+    for j in -(radius as i32)..=radius as i32 {
+        for i in -(radius as i32)..=radius as i32 {
+            offsets.push((i as f32, j as f32));
+        }
+    }
+
+    offsets
+}
+
+fn invert_2x2(a00: f32, a01: f32, a11: f32, det_epsilon: f32) -> Option<(f32, f32, f32)> {
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() <= det_epsilon {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+    Some((a11 * inv_det, -a01 * inv_det, a00 * inv_det))
 }
 
 /// Checks that the window stays within image bounds
@@ -192,4 +209,23 @@ fn interpolate_alt(img: &ImageBuffer<Luma<i16>, Vec<i16>>, x: f32, y: f32) -> f3
     }
 
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invert_2x2;
+
+    #[test]
+    fn invert_2x2_returns_inverse_components() {
+        let (inv00, inv01, inv11) = invert_2x2(4.0, 1.0, 3.0, 1e-6).unwrap();
+
+        assert!((inv00 - 3.0 / 11.0).abs() < 1e-6);
+        assert!((inv01 + 1.0 / 11.0).abs() < 1e-6);
+        assert!((inv11 - 4.0 / 11.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invert_2x2_rejects_singular_matrix() {
+        assert!(invert_2x2(1.0, 2.0, 4.0, 1e-6).is_none());
+    }
 }
