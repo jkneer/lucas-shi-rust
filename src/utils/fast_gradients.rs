@@ -103,21 +103,29 @@ unsafe fn compute_gradients_avx2(img: &GrayImage) -> GradientProduct {
     let interior_chunks_end = 1 + ((width - 2) / 16) * 16;
 
     for y in 1..height - 1 {
-        let top = src.as_ptr().add((y - 1) * width);
-        let mid = src.as_ptr().add(y * width);
-        let bottom = src.as_ptr().add((y + 1) * width);
+        let (top, mid, bottom) = unsafe {
+            (
+                src.as_ptr().add((y - 1) * width),
+                src.as_ptr().add(y * width),
+                src.as_ptr().add((y + 1) * width),
+            )
+        };
         let row = y * width;
 
         let mut x = 1usize;
         while x < interior_chunks_end {
-            let tl = load_u8x16_as_i16(top.add(x - 1));
-            let tc = load_u8x16_as_i16(top.add(x));
-            let tr = load_u8x16_as_i16(top.add(x + 1));
-            let ml = load_u8x16_as_i16(mid.add(x - 1));
-            let mr = load_u8x16_as_i16(mid.add(x + 1));
-            let bl = load_u8x16_as_i16(bottom.add(x - 1));
-            let bc = load_u8x16_as_i16(bottom.add(x));
-            let br = load_u8x16_as_i16(bottom.add(x + 1));
+            let (tl, tc, tr, ml, mr, bl, bc, br) = unsafe {
+                (
+                    load_u8x16_as_i16(top.add(x - 1)),
+                    load_u8x16_as_i16(top.add(x)),
+                    load_u8x16_as_i16(top.add(x + 1)),
+                    load_u8x16_as_i16(mid.add(x - 1)),
+                    load_u8x16_as_i16(mid.add(x + 1)),
+                    load_u8x16_as_i16(bottom.add(x - 1)),
+                    load_u8x16_as_i16(bottom.add(x)),
+                    load_u8x16_as_i16(bottom.add(x + 1)),
+                )
+            };
 
             let gx3 = _mm256_sub_epi16(_mm256_add_epi16(tr, br), _mm256_add_epi16(tl, bl));
             let gx10 = _mm256_sub_epi16(mr, ml);
@@ -133,8 +141,10 @@ unsafe fn compute_gradients_avx2(img: &GrayImage) -> GradientProduct {
                 _mm256_mullo_epi16(gy10, coeff10),
             );
 
-            _mm256_storeu_si256(grad_x.as_mut_ptr().add(row + x) as *mut __m256i, gx);
-            _mm256_storeu_si256(grad_y.as_mut_ptr().add(row + x) as *mut __m256i, gy);
+            unsafe {
+                _mm256_storeu_si256(grad_x.as_mut_ptr().add(row + x) as *mut __m256i, gx);
+                _mm256_storeu_si256(grad_y.as_mut_ptr().add(row + x) as *mut __m256i, gy);
+            }
             x += 16;
         }
 
@@ -164,7 +174,7 @@ unsafe fn compute_gradients_avx2(img: &GrayImage) -> GradientProduct {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn load_u8x16_as_i16(ptr: *const u8) -> __m256i {
-    _mm256_cvtepu8_epi16(_mm_loadu_si128(ptr as *const __m128i))
+    unsafe { _mm256_cvtepu8_epi16(_mm_loadu_si128(ptr as *const __m128i)) }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -187,21 +197,29 @@ unsafe fn compute_gradients_neon(img: &GrayImage) -> GradientProduct {
     let interior_chunks_end = 1 + ((width - 2) / 16) * 16;
 
     for y in 1..height - 1 {
-        let top = src.as_ptr().add((y - 1) * width);
-        let mid = src.as_ptr().add(y * width);
-        let bottom = src.as_ptr().add((y + 1) * width);
+        let (top, mid, bottom) = unsafe {
+            (
+                src.as_ptr().add((y - 1) * width),
+                src.as_ptr().add(y * width),
+                src.as_ptr().add((y + 1) * width),
+            )
+        };
         let row = y * width;
 
         let mut x = 1usize;
         while x < interior_chunks_end {
-            let tl = load_u8x16_as_i16x8x2(top.add(x - 1));
-            let tc = load_u8x16_as_i16x8x2(top.add(x));
-            let tr = load_u8x16_as_i16x8x2(top.add(x + 1));
-            let ml = load_u8x16_as_i16x8x2(mid.add(x - 1));
-            let mr = load_u8x16_as_i16x8x2(mid.add(x + 1));
-            let bl = load_u8x16_as_i16x8x2(bottom.add(x - 1));
-            let bc = load_u8x16_as_i16x8x2(bottom.add(x));
-            let br = load_u8x16_as_i16x8x2(bottom.add(x + 1));
+            let (tl, tc, tr, ml, mr, bl, bc, br) = unsafe {
+                (
+                    load_u8x16_as_i16x8x2(top.add(x - 1)),
+                    load_u8x16_as_i16x8x2(top.add(x)),
+                    load_u8x16_as_i16x8x2(top.add(x + 1)),
+                    load_u8x16_as_i16x8x2(mid.add(x - 1)),
+                    load_u8x16_as_i16x8x2(mid.add(x + 1)),
+                    load_u8x16_as_i16x8x2(bottom.add(x - 1)),
+                    load_u8x16_as_i16x8x2(bottom.add(x)),
+                    load_u8x16_as_i16x8x2(bottom.add(x + 1)),
+                )
+            };
 
             let gx_lo = vaddq_s16(
                 vmulq_s16(
@@ -232,10 +250,12 @@ unsafe fn compute_gradients_neon(img: &GrayImage) -> GradientProduct {
                 vmulq_s16(vsubq_s16(bc.1, tc.1), coeff10),
             );
 
-            vst1q_s16(grad_x.as_mut_ptr().add(row + x), gx_lo);
-            vst1q_s16(grad_x.as_mut_ptr().add(row + x + 8), gx_hi);
-            vst1q_s16(grad_y.as_mut_ptr().add(row + x), gy_lo);
-            vst1q_s16(grad_y.as_mut_ptr().add(row + x + 8), gy_hi);
+            unsafe {
+                vst1q_s16(grad_x.as_mut_ptr().add(row + x), gx_lo);
+                vst1q_s16(grad_x.as_mut_ptr().add(row + x + 8), gx_hi);
+                vst1q_s16(grad_y.as_mut_ptr().add(row + x), gy_lo);
+                vst1q_s16(grad_y.as_mut_ptr().add(row + x + 8), gy_hi);
+            }
             x += 16;
         }
 
@@ -265,7 +285,7 @@ unsafe fn compute_gradients_neon(img: &GrayImage) -> GradientProduct {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn load_u8x16_as_i16x8x2(ptr: *const u8) -> (int16x8_t, int16x8_t) {
-    let bytes = vld1q_u8(ptr);
+    let bytes = unsafe { vld1q_u8(ptr) };
     (
         vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(bytes))),
         vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(bytes))),

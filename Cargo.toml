@@ -1,7 +1,7 @@
 [package]
 name = "optical-flow-lk"
-version = "0.1.0"
-edition = "2021"
+version = "0.1.1"
+edition = "2024"
 authors = ["den59k <den59k@gmail.com>"]
 description = "Rust implementation of Lucas-Kanade optical flow and Shi-Tomasi feature detection"
 license = "MIT"
