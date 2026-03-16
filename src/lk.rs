@@ -28,67 +28,67 @@ pub fn calc_optical_flow(
     let radius = window_size / 2;
     let epsilon = 1e-3;
 
-    // Инициализируем смещения нулями
+    // Initialize displacements to zero
     let mut displacements: Vec<(f32, f32)> = prev_points.iter().map(|_| (0.0, 0.0)).collect();
 
-    // Обрабатываем уровни от верхнего (мелкого) к нижнему (детальному)
+    // Process levels from top (coarse) to bottom (fine)
     for level in (0..n_levels).rev() {
         let scale = 2f32.powi(level as i32);
 
-        // Получаем изображения для текущего уровня
+        // Get the images for the current level
         let prev_img = &prev_pyramid[level];
         let curr_img = &curr_pyramid[level];
 
-        // Вычисляем градиенты для предыдущего изображения
+        // Compute gradients for the previous image
         // let grad_x = horizontal_scharr(prev_img);
         // let grad_y = vertical_scharr(prev_img);
         // console_log!("{}", performance.now()-now);
         let (grad_x, grad_y) = compute_gradients(prev_img);
 
-        // Обрабатываем каждую точку
+        // Process each point
         for ((prev_x, prev_y), disp) in prev_points.iter().zip(displacements.iter_mut()) {
-            // Масштабируем исходную точку для текущего уровня
+            // Scale the original point for the current level
             let x = *prev_x / scale;
             let y = *prev_y / scale;
 
-            // Добавляем текущее смещение (масштабированное для этого уровня)
+            // Add the current displacement, scaled for this level
             let mut dx = disp.0 / scale;
             let mut dy = disp.1 / scale;
 
-            // Пропускаем точки вне границ изображения
+            // Skip points outside image bounds
             if !in_bounds(prev_img, x, y, radius) {
                 continue;
             }
 
-            // Уточняем смещение на текущем уровне
+            // Refine the displacement at the current level
             let mut converged = false;
             for _ in 0..max_iterations {
                 if converged {
                     break;
                 }
 
-                // Вычисляем текущую позицию в целевом изображении
+                // Compute the current position in the target image
                 let curr_x = x + dx;
                 let curr_y = y + dy;
 
-                // Проверяем границы в целевом изображении
+                // Check bounds in the target image
                 if !in_bounds(curr_img, curr_x, curr_y, radius) {
                     break;
                 }
 
-                // Собираем данные для системы уравнений
+                // Collect data for the linear system
                 let mut a_data = Vec::with_capacity(window_size * window_size * 2);
                 let mut b_data = Vec::with_capacity(window_size * window_size);
 
                 for j in -(radius as i32)..=radius as i32 {
                     for i in -(radius as i32)..=radius as i32 {
-                        // Координаты в предыдущем изображении
+                        // Coordinates in the previous image
                         let px_prev = interpolate(prev_img, x + i as f32, y + j as f32);
 
-                        // Координаты в текущем изображении с учетом смещения
+                        // Coordinates in the current image with displacement applied
                         let px_curr = interpolate(curr_img, curr_x + i as f32, curr_y + j as f32);
 
-                        // Градиенты в предыдущем изображении (фиксированные!)
+                        // Gradients in the previous image (fixed)
                         let ix = interpolate_alt(&grad_x, x + i as f32, y + j as f32) / 32.0;
                         let iy = interpolate_alt(&grad_y, x + i as f32, y + j as f32) / 32.0;
 
@@ -98,7 +98,7 @@ pub fn calc_optical_flow(
                     }
                 }
 
-                // Решаем систему уравнений
+                // Solve the linear system
                 let n_pixels = window_size * window_size;
                 if a_data.len() != 2 * n_pixels || b_data.len() != n_pixels {
                     break;
@@ -124,12 +124,12 @@ pub fn calc_optical_flow(
                 }
             }
 
-            // Обновляем общее смещение с учетом масштаба текущего уровня
+            // Update the total displacement with the current level scale
             *disp = (dx * scale, dy * scale);
         }
     }
 
-    // Возвращаем итоговые позиции
+    // Return the final positions
     prev_points
         .iter()
         .zip(displacements.iter())
@@ -137,13 +137,13 @@ pub fn calc_optical_flow(
         .collect()
 }
 
-/// Проверка, что окно не выходит за границы изображения
+/// Checks that the window stays within image bounds
 fn in_bounds(img: &GrayImage, x: f32, y: f32, radius: usize) -> bool {
     let (w, h) = (img.width() as f32, img.height() as f32);
     x >= radius as f32 && x < w - radius as f32 && y >= radius as f32 && y < h - radius as f32
 }
 
-/// Билинейная интерполяция значения пикселя
+/// Bilinear interpolation of the pixel value
 fn interpolate(img: &GrayImage, x: f32, y: f32) -> f32 {
     let x0 = x.floor() as i32;
     let y0 = y.floor() as i32;

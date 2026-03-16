@@ -18,7 +18,7 @@ pub fn build_pyramid(image: &GrayImage, levels: usize) -> Vec<GrayImage> {
         let previous_level = &pyramid[level - 1];
         let (width, height) = (previous_level.width(), previous_level.height());
 
-        // Проверяем, что изображение можно уменьшить
+        // Check that the image can be downscaled
         if width < 2 || height < 2 {
             break;
         }
@@ -33,7 +33,7 @@ pub fn build_pyramid(image: &GrayImage, levels: usize) -> Vec<GrayImage> {
                 let px = 2 * x;
                 let py = 2 * y;
 
-                // Усреднение 4 пикселей
+                // Average 4 pixels
                 let pixel1 = previous_level.get_pixel(px, py)[0] as u32;
                 let pixel2 = previous_level.get_pixel(px + 1, py)[0] as u32;
                 let pixel3 = previous_level.get_pixel(px, py + 1)[0] as u32;
