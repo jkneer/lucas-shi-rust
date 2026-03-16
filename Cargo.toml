@@ -12,8 +12,10 @@ categories = ["computer-vision", "algorithms", "science"]
 
 [dependencies]
 image = "0.25.10"
-imageproc = "0.26.1"
 nalgebra = "0.34.1"
+
+[dev-dependencies]
+imageproc = "0.26.1"
 
 [[bench]]
 name = "gradients"
