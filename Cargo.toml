@@ -1,7 +1,7 @@
 [package]
 name = "optical-flow-lk"
-version = "0.1.0"
-edition = "2021"
+version = "0.1.1"
+edition = "2024"
 authors = ["den59k <den59k@gmail.com>"]
 description = "Rust implementation of Lucas-Kanade optical flow and Shi-Tomasi feature detection"
 license = "MIT"
@@ -11,6 +11,16 @@ keywords = ["optical-flow", "tracking", "computer-vision", "feature-detection", 
 categories = ["computer-vision", "algorithms", "science"]
 
 [dependencies]
-image = "0.25.5"
-imageproc = "0.25.0"
-nalgebra = "0.33.2"
+image = "0.25.10"
+nalgebra = "0.34.1"
+
+[dev-dependencies]
+imageproc = "0.26.1"
+
+[[bench]]
+name = "gradients"
+harness = false
+
+[[bench]]
+name = "lk"
+harness = false

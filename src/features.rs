@@ -1,5 +1,4 @@
 use image::{GrayImage, ImageBuffer, Luma};
-use imageproc::gradients::{HORIZONTAL_SCHARR, VERTICAL_SCHARR};
 use std::cmp::Ordering;
 
 use crate::utils::{box_filter_3x3::box_filter_3x3_in_place, fast_gradients::compute_gradients};
@@ -19,30 +18,30 @@ pub fn good_features_to_track(
     quality_level: f32,
     min_distance: u32,
 ) -> Vec<(u32, u32, f32)> {
-    // Вычисление градиентов
-    let (gx, gy) = compute_gradients(image, &HORIZONTAL_SCHARR, &VERTICAL_SCHARR);
+    // Compute gradients
+    let (gx, gy) = compute_gradients(image);
 
-    // Вычисление квадратов градиентов и их произведений
+    // Compute squared gradients and their product
     let (mut ix_sq, mut iy_sq, mut ix_iy) = compute_gradient_products(&gx, &gy);
 
-    // Сглаживание фильтрами 3x3
+    // Smooth with 3x3 filters
     box_filter_3x3_in_place(&mut ix_sq);
     box_filter_3x3_in_place(&mut iy_sq);
     box_filter_3x3_in_place(&mut ix_iy);
 
-    // Вычисление минимальных собственных значений
+    // Compute minimum eigenvalues
     let mut features = compute_min_eigenvalues(&ix_sq, &iy_sq, &ix_iy);
 
     // Non-maximum suppression
     non_maximum_suppression(&mut features, image.width(), image.height());
 
-    // Фильтрация по качеству
+    // Filter by quality
     filter_by_quality(&mut features, quality_level);
 
-    // Сортировка по убыванию качества
+    // Sort by descending quality
     features.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
 
-    // Фильтрация по расстоянию
+    // Filter by distance
     filter_by_distance(&features, min_distance, image.width(), image.height())
 }
 
