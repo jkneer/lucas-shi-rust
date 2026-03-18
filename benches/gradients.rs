@@ -1,3 +1,5 @@
+#![cfg_attr(has_portable_simd, feature(portable_simd))]
+
 // Main findings from this benchmark:
 // - The historical Scharr loop is slowed down mostly by per-pixel `put_pixel` writes.
 // - Writing into flat `Vec<i16>` buffers first and wrapping them with `ImageBuffer::from_vec`
@@ -6,6 +8,8 @@
 //   faster than the historical implementation in earlier runs.
 // - On Raspberry Pi 5 (aarch64), the indexed scalar path was about 4.8x to 5.7x faster than
 //   the historical implementation, and the NEON path was about 7.5x to 13.7x faster.
+// - On nightly compilers, this bench also includes `std::simd` portable-SIMD rows:
+//   a baseline row, an AVX2-targeted row, and an AVX-512-targeted row when the CPU supports them.
 // - `imageproc`'s Scharr pair computes equivalent interior gradients, but border behavior differs:
 //   the historical code leaves borders as zero while `imageproc` clamps out-of-bounds samples.
 // - On Raspberry Pi 5, `imageproc_scharr_pair` and `gradients_grayscale` were both about 3x
@@ -17,17 +21,26 @@
 // continue to agree where they are supposed to.
 
 use std::hint::black_box;
+#[cfg(has_portable_simd)]
+use std::mem::MaybeUninit;
 use std::time::{Duration, Instant};
 
 use image::{GrayImage, ImageBuffer, Luma};
 use imageproc::gradients::{gradients_grayscale, horizontal_scharr, vertical_scharr};
 use imageproc::kernel::{SCHARR_HORIZONTAL_3X3, SCHARR_VERTICAL_3X3};
+use optical_flow_lk::compute_gradients as crate_compute_gradients;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+#[cfg(has_portable_simd)]
+use std::ptr;
+#[cfg(has_portable_simd)]
+use std::simd::num::SimdUint;
+#[cfg(has_portable_simd)]
+use std::simd::Simd;
 
 const HORIZONTAL_SCHARR_3X3_OLD: [i32; 9] = [-3, 0, 3, -10, 0, 10, -3, 0, 3];
 const VERTICAL_SCHARR_3X3_OLD: [i32; 9] = [-3, -10, -3, 0, 0, 0, 3, 10, 3];
@@ -149,6 +162,291 @@ fn simd_label() -> &'static str {
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
 fn simd_label() -> &'static str {
     "manual_scharr_old_simd_fallback"
+}
+
+#[cfg(has_portable_simd)]
+fn manual_scharr_old_portable_simd(img: &GrayImage) -> GradientPair {
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+
+    if width < 3 || height < 3 {
+        return (
+            ImageBuffer::new(img.width(), img.height()),
+            ImageBuffer::new(img.width(), img.height()),
+        );
+    }
+
+    let src = img.as_raw();
+    let mut grad_x = vec![0i16; width * height];
+    let mut grad_y = vec![0i16; width * height];
+
+    let coeff3 = Simd::<i16, 16>::splat(3);
+    let coeff10 = Simd::<i16, 16>::splat(10);
+    let simd_end = 1 + ((width - 2) / 16) * 16;
+
+    for y in 1..height - 1 {
+        let top = (y - 1) * width;
+        let mid = y * width;
+        let bottom = (y + 1) * width;
+        let row = y * width;
+
+        let mut x = 1usize;
+        while x < simd_end {
+            let tl = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x - 1)) };
+            let tc = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x)) };
+            let tr = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x + 1)) };
+            let ml = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(mid + x - 1)) };
+            let mr = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(mid + x + 1)) };
+            let bl = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x - 1)) };
+            let bc = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x)) };
+            let br = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x + 1)) };
+
+            let gx = ((tr + br) - (tl + bl)) * coeff3 + (mr - ml) * coeff10;
+            let gy = ((bl + br) - (tl + tr)) * coeff3 + (bc - tc) * coeff10;
+
+            unsafe {
+                store_i16x16_simd(grad_x.as_mut_ptr().add(row + x), gx);
+                store_i16x16_simd(grad_y.as_mut_ptr().add(row + x), gy);
+            }
+            x += 16;
+        }
+
+        while x < width - 1 {
+            let idx = row + x;
+            let gx = 3
+                * ((src[(y - 1) * width + x + 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y + 1) * width + x - 1] as i32))
+                + 10 * (src[y * width + x + 1] as i32 - src[y * width + x - 1] as i32);
+            let gy = 3
+                * ((src[(y + 1) * width + x - 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y - 1) * width + x + 1] as i32))
+                + 10 * (src[(y + 1) * width + x] as i32 - src[(y - 1) * width + x] as i32);
+
+            grad_x[idx] = gx as i16;
+            grad_y[idx] = gy as i16;
+            x += 1;
+        }
+    }
+
+    (
+        ImageBuffer::from_vec(img.width(), img.height(), grad_x).unwrap(),
+        ImageBuffer::from_vec(img.width(), img.height(), grad_y).unwrap(),
+    )
+}
+
+#[cfg(has_portable_simd)]
+#[inline(always)]
+unsafe fn load_u8x16_as_i16_simd(ptr_u8: *const u8) -> Simd<i16, 16> {
+    let bytes = unsafe { ptr::read_unaligned(ptr_u8 as *const [u8; 16]) };
+    Simd::<u8, 16>::from_array(bytes).cast::<i16>()
+}
+
+#[cfg(has_portable_simd)]
+#[inline(always)]
+unsafe fn store_i16x16_simd(ptr_i16: *mut i16, values: Simd<i16, 16>) {
+    let values = values.to_array();
+    unsafe { ptr::write_unaligned(ptr_i16 as *mut [i16; 16], values) };
+}
+
+#[cfg(has_portable_simd)]
+#[inline(always)]
+unsafe fn load_u8x32_as_i16_simd(ptr_u8: *const u8) -> Simd<i16, 32> {
+    let bytes = unsafe { ptr::read_unaligned(ptr_u8 as *const [u8; 32]) };
+    Simd::<u8, 32>::from_array(bytes).cast::<i16>()
+}
+
+#[cfg(has_portable_simd)]
+#[inline(always)]
+unsafe fn store_i16x32_simd(ptr_i16: *mut i16, values: Simd<i16, 32>) {
+    let values = values.to_array();
+    unsafe { ptr::write_unaligned(ptr_i16 as *mut [i16; 32], values) };
+}
+
+#[cfg(has_portable_simd)]
+fn portable_simd_label() -> &'static str {
+    "manual_scharr_old_portable"
+}
+
+#[cfg(has_portable_simd)]
+fn portable_simd_enabled() -> bool {
+    true
+}
+
+#[cfg(not(has_portable_simd))]
+fn portable_simd_enabled() -> bool {
+    false
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+fn portable_simd_avx2_enabled() -> bool {
+    is_x86_feature_detected!("avx2")
+}
+
+#[cfg(not(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64"))))]
+fn portable_simd_avx2_enabled() -> bool {
+    false
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+fn portable_simd_avx512_enabled() -> bool {
+    is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+}
+
+#[cfg(not(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64"))))]
+fn portable_simd_avx512_enabled() -> bool {
+    false
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+fn portable_simd_avx2_label() -> &'static str {
+    "manual_scharr_old_portable_avx2"
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+fn portable_simd_avx512_label() -> &'static str {
+    "manual_scharr_old_portable_avx512"
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+#[target_feature(enable = "avx2")]
+unsafe fn manual_scharr_old_portable_simd_avx2(img: &GrayImage) -> GradientPair {
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+
+    if width < 3 || height < 3 {
+        return (
+            ImageBuffer::new(img.width(), img.height()),
+            ImageBuffer::new(img.width(), img.height()),
+        );
+    }
+
+    let src = img.as_raw();
+    let mut grad_x = vec![0i16; width * height];
+    let mut grad_y = vec![0i16; width * height];
+
+    let coeff3 = Simd::<i16, 16>::splat(3);
+    let coeff10 = Simd::<i16, 16>::splat(10);
+    let simd_end = 1 + ((width - 2) / 16) * 16;
+
+    for y in 1..height - 1 {
+        let top = (y - 1) * width;
+        let mid = y * width;
+        let bottom = (y + 1) * width;
+        let row = y * width;
+
+        let mut x = 1usize;
+        while x < simd_end {
+            let tl = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x - 1)) };
+            let tc = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x)) };
+            let tr = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(top + x + 1)) };
+            let ml = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(mid + x - 1)) };
+            let mr = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(mid + x + 1)) };
+            let bl = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x - 1)) };
+            let bc = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x)) };
+            let br = unsafe { load_u8x16_as_i16_simd(src.as_ptr().add(bottom + x + 1)) };
+
+            let gx = ((tr + br) - (tl + bl)) * coeff3 + (mr - ml) * coeff10;
+            let gy = ((bl + br) - (tl + tr)) * coeff3 + (bc - tc) * coeff10;
+
+            unsafe {
+                store_i16x16_simd(grad_x.as_mut_ptr().add(row + x), gx);
+                store_i16x16_simd(grad_y.as_mut_ptr().add(row + x), gy);
+            }
+            x += 16;
+        }
+
+        while x < width - 1 {
+            let idx = row + x;
+            let gx = 3
+                * ((src[(y - 1) * width + x + 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y + 1) * width + x - 1] as i32))
+                + 10 * (src[y * width + x + 1] as i32 - src[y * width + x - 1] as i32);
+            let gy = 3
+                * ((src[(y + 1) * width + x - 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y - 1) * width + x + 1] as i32))
+                + 10 * (src[(y + 1) * width + x] as i32 - src[(y - 1) * width + x] as i32);
+
+            grad_x[idx] = gx as i16;
+            grad_y[idx] = gy as i16;
+            x += 1;
+        }
+    }
+
+    (
+        ImageBuffer::from_vec(img.width(), img.height(), grad_x).unwrap(),
+        ImageBuffer::from_vec(img.width(), img.height(), grad_y).unwrap(),
+    )
+}
+
+#[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn manual_scharr_old_portable_simd_avx512(img: &GrayImage) -> GradientPair {
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+
+    if width < 3 || height < 3 {
+        return (
+            ImageBuffer::new(img.width(), img.height()),
+            ImageBuffer::new(img.width(), img.height()),
+        );
+    }
+
+    let src = img.as_raw();
+    let mut grad_x = vec![0i16; width * height];
+    let mut grad_y = vec![0i16; width * height];
+
+    let coeff3 = Simd::<i16, 32>::splat(3);
+    let coeff10 = Simd::<i16, 32>::splat(10);
+    let simd_end = 1 + ((width - 2) / 32) * 32;
+
+    for y in 1..height - 1 {
+        let top = (y - 1) * width;
+        let mid = y * width;
+        let bottom = (y + 1) * width;
+        let row = y * width;
+
+        let mut x = 1usize;
+        while x < simd_end {
+            let tl = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(top + x - 1)) };
+            let tc = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(top + x)) };
+            let tr = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(top + x + 1)) };
+            let ml = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(mid + x - 1)) };
+            let mr = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(mid + x + 1)) };
+            let bl = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(bottom + x - 1)) };
+            let bc = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(bottom + x)) };
+            let br = unsafe { load_u8x32_as_i16_simd(src.as_ptr().add(bottom + x + 1)) };
+
+            let gx = ((tr + br) - (tl + bl)) * coeff3 + (mr - ml) * coeff10;
+            let gy = ((bl + br) - (tl + tr)) * coeff3 + (bc - tc) * coeff10;
+
+            unsafe {
+                store_i16x32_simd(grad_x.as_mut_ptr().add(row + x), gx);
+                store_i16x32_simd(grad_y.as_mut_ptr().add(row + x), gy);
+            }
+            x += 32;
+        }
+
+        while x < width - 1 {
+            let idx = row + x;
+            let gx = 3
+                * ((src[(y - 1) * width + x + 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y + 1) * width + x - 1] as i32))
+                + 10 * (src[y * width + x + 1] as i32 - src[y * width + x - 1] as i32);
+            let gy = 3
+                * ((src[(y + 1) * width + x - 1] as i32 + src[(y + 1) * width + x + 1] as i32)
+                    - (src[(y - 1) * width + x - 1] as i32 + src[(y - 1) * width + x + 1] as i32))
+                + 10 * (src[(y + 1) * width + x] as i32 - src[(y - 1) * width + x] as i32);
+
+            grad_x[idx] = gx as i16;
+            grad_y[idx] = gy as i16;
+            x += 1;
+        }
+    }
+
+    (
+        ImageBuffer::from_vec(img.width(), img.height(), grad_x).unwrap(),
+        ImageBuffer::from_vec(img.width(), img.height(), grad_y).unwrap(),
+    )
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -427,11 +725,27 @@ fn validate_implementations() {
     let indexed =
         manual_scharr_old_indexed(&img, &HORIZONTAL_SCHARR_3X3_OLD, &VERTICAL_SCHARR_3X3_OLD);
     let simd = manual_scharr_old_simd(&img);
+    let live = crate_compute_gradients(&img);
+    #[cfg(has_portable_simd)]
+    let portable = manual_scharr_old_portable_simd(&img);
     let imageproc_pair = imageproc_scharr_pair(&img);
     let imageproc_mag = imageproc_scharr_magnitude(&img);
 
     assert_pairs_match_exact(&manual, &indexed);
     assert_pairs_match_exact(&manual, &simd);
+    assert_pairs_match_exact(&manual, &live);
+    #[cfg(has_portable_simd)]
+    assert_pairs_match_exact(&manual, &portable);
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if portable_simd_avx2_enabled() {
+        let portable_avx2 = unsafe { manual_scharr_old_portable_simd_avx2(&img) };
+        assert_pairs_match_exact(&manual, &portable_avx2);
+    }
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if portable_simd_avx512_enabled() {
+        let portable_avx512 = unsafe { manual_scharr_old_portable_simd_avx512(&img) };
+        assert_pairs_match_exact(&manual, &portable_avx512);
+    }
 
     // Borders differ because the historical code leaves them at zero,
     // while imageproc clamps out-of-bounds samples.
@@ -487,6 +801,38 @@ fn run_case(width: u32, height: u32, iterations: usize) {
     let simd_elapsed = time_it(iterations, || manual_scharr_old_simd(&img));
     print_result(simd_label(), iterations, simd_elapsed);
 
+    let live_elapsed = time_it(iterations, || crate_compute_gradients(&img));
+    print_result("crate_compute_gradients", iterations, live_elapsed);
+
+    #[cfg(has_portable_simd)]
+    let portable_elapsed = time_it(iterations, || manual_scharr_old_portable_simd(&img));
+    #[cfg(has_portable_simd)]
+    print_result(portable_simd_label(), iterations, portable_elapsed);
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    let portable_avx2_elapsed = if portable_simd_avx2_enabled() {
+        Some(time_it(iterations, || unsafe {
+            manual_scharr_old_portable_simd_avx2(&img)
+        }))
+    } else {
+        None
+    };
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if let Some(elapsed) = portable_avx2_elapsed {
+        print_result(portable_simd_avx2_label(), iterations, elapsed);
+    }
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    let portable_avx512_elapsed = if portable_simd_avx512_enabled() {
+        Some(time_it(iterations, || unsafe {
+            manual_scharr_old_portable_simd_avx512(&img)
+        }))
+    } else {
+        None
+    };
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if let Some(elapsed) = portable_avx512_elapsed {
+        print_result(portable_simd_avx512_label(), iterations, elapsed);
+    }
+
     let pair_elapsed = time_it(iterations, || imageproc_scharr_pair(&img));
     print_result("imageproc_scharr_pair", iterations, pair_elapsed);
 
@@ -497,15 +843,47 @@ fn run_case(width: u32, height: u32, iterations: usize) {
     let mag_speedup = old_elapsed.as_secs_f64() / mag_elapsed.as_secs_f64();
     let indexed_speedup = old_elapsed.as_secs_f64() / indexed_elapsed.as_secs_f64();
     let simd_speedup = old_elapsed.as_secs_f64() / simd_elapsed.as_secs_f64();
+    let live_speedup = old_elapsed.as_secs_f64() / live_elapsed.as_secs_f64();
 
     println!("ratio old/indexed: {indexed_speedup:.3}x");
     println!("ratio old/simd  : {simd_speedup:.3}x");
+    println!("ratio old/live  : {live_speedup:.3}x");
+    #[cfg(has_portable_simd)]
+    println!(
+        "ratio old/portable: {:.3}x",
+        old_elapsed.as_secs_f64() / portable_elapsed.as_secs_f64()
+    );
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if let Some(elapsed) = portable_avx2_elapsed {
+        println!(
+            "ratio old/portable_avx2: {:.3}x",
+            old_elapsed.as_secs_f64() / elapsed.as_secs_f64()
+        );
+    }
+    #[cfg(all(has_portable_simd, any(target_arch = "x86", target_arch = "x86_64")))]
+    if let Some(elapsed) = portable_avx512_elapsed {
+        println!(
+            "ratio old/portable_avx512: {:.3}x",
+            old_elapsed.as_secs_f64() / elapsed.as_secs_f64()
+        );
+    }
     println!("ratio old/pair: {pair_speedup:.3}x");
     println!("ratio old/mag : {mag_speedup:.3}x (not equivalent work)");
 }
 
 fn main() {
     println!("Scharr benchmark: old manual loop vs imageproc");
+    if portable_simd_enabled() {
+        println!("portable std::simd bench enabled on this compiler");
+    } else {
+        println!("portable std::simd bench disabled on this compiler");
+    }
+    if portable_simd_avx2_enabled() {
+        println!("portable std::simd AVX2 row enabled on this CPU");
+    }
+    if portable_simd_avx512_enabled() {
+        println!("portable std::simd AVX-512 row enabled on this CPU");
+    }
     validate_implementations();
     println!("Correctness check passed (interior equality; borders differ by design)");
     run_case(200, 150, 500);

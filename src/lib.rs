@@ -13,6 +13,7 @@ mod pyramid;
 mod utils;
 
 // Re-export main functionality
+pub use crate::utils::fast_gradients::compute_gradients;
 pub use features::good_features_to_track;
 pub use lk::calc_optical_flow;
 pub use pyramid::build_pyramid;
